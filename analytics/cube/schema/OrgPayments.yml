@@ -1,0 +1,449 @@
+# =============================================================================
+# OrgPayments.yml
+# Cube semantic model for enterprise org / division payment analytics.
+#
+# Source table: payment_analytics.org_txn_daily_summary
+#
+# Each row = one (org_id, division_id, txn_date, counterparty_id,
+#                  transfer_type, status) bucket with pre-computed totals.
+#
+# Designed to answer:
+#   "For org X / division Y, how are outgoing payments distributed across
+#    counterparties, over what time period, with what success rate?"
+# =============================================================================
+
+cubes:
+  - name: OrgPayments
+    sql_table: payment_analytics.org_txn_daily_summary
+    title: Org / Division Payments
+    description: >
+      Daily payment aggregates for enterprise organisations and their divisions.
+      Supports counterparty distribution charts, time-trend lines, drill-downs
+      by division, and status-based filtering.
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Dimensions
+    # ─────────────────────────────────────────────────────────────────────────
+    dimensions:
+
+      - name: summary_id
+        sql: summary_id
+        type: number
+        primary_key: true
+        shown: false
+
+      # ── Identity ─────────────────────────────────────────────────────────
+
+      - name: org_id
+        sql: org_id
+        type: string
+        title: Organisation ID
+        description: Unique identifier of the organisation.
+
+      - name: division_id
+        sql: "COALESCE(division_id, 'ORG_LEVEL')"
+        type: string
+        title: Division ID
+        description: Business unit within the org. "ORG_LEVEL" when no division.
+
+      - name: org_division_key
+        sql: "org_id || ' / ' || COALESCE(division_id, 'ORG_LEVEL')"
+        type: string
+        title: Org / Division
+        description: Combined label e.g. "ACME_CORP / SALES" for display.
+
+      # ── Time ─────────────────────────────────────────────────────────────
+
+      - name: txn_date
+        sql: txn_date
+        type: time
+        title: Transaction Date
+
+      - name: txn_year
+        sql: "EXTRACT(YEAR FROM txn_date)::int"
+        type: number
+        title: Year
+
+      - name: txn_quarter
+        sql: "EXTRACT(QUARTER FROM txn_date)::int"
+        type: number
+        title: Quarter
+        description: "1 = Jan–Mar, 2 = Apr–Jun, 3 = Jul–Sep, 4 = Oct–Dec"
+
+      - name: txn_month
+        sql: "EXTRACT(MONTH FROM txn_date)::int"
+        type: number
+        title: Month (number)
+
+      - name: txn_week
+        sql: "DATE_TRUNC('week', txn_date)"
+        type: time
+        title: Week (starts Monday)
+
+      # ── Counterparty ─────────────────────────────────────────────────────
+
+      - name: counterparty_id
+        sql: counterparty_id
+        type: string
+        title: Counterparty ID
+
+      - name: counterparty_name
+        sql: "COALESCE(counterparty_name, counterparty_id)"
+        type: string
+        title: Counterparty Name
+        description: Human-readable label; falls back to ID when name is absent.
+
+      - name: counterparty_type
+        sql: counterparty_type
+        type: string
+        title: Counterparty Type
+        description: "WALLET or BANK_ACCOUNT"
+
+      # ── Transfer ─────────────────────────────────────────────────────────
+
+      - name: transfer_type
+        sql: transfer_type
+        type: string
+        title: Transfer Type
+        description: "WALLET_TO_WALLET | WALLET_TO_ACCOUNT | ACCOUNT_TO_WALLET | ACCOUNT_TO_ACCOUNT"
+
+      - name: status
+        sql: status
+        type: string
+        title: Status
+        description: "COMPLETED | FAILED | REVERSED | PENDING_PAYMENT | INITIATED"
+
+      # ── Derived bucketing — used for amount-range filter in dashboards ────
+
+      - name: amount_bucket
+        type: string
+        title: Amount Range
+        description: "Group transactions into human-readable size bands for histogram charts."
+        sql: >
+          CASE
+            WHEN total_amount < 1000        THEN 'A: < ₹1K'
+            WHEN total_amount < 10000       THEN 'B: ₹1K – ₹10K'
+            WHEN total_amount < 100000      THEN 'C: ₹10K – ₹1L'
+            WHEN total_amount < 1000000     THEN 'D: ₹1L – ₹10L'
+            ELSE                                 'E: > ₹10L'
+          END
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Measures
+    # ─────────────────────────────────────────────────────────────────────────
+    measures:
+
+      # ── Volume ───────────────────────────────────────────────────────────
+
+      - name: total_transactions
+        sql: txn_count
+        type: sum
+        title: Total Transactions
+        format: number
+        description: Count of individual transfer records in the window.
+
+      - name: unique_counterparties
+        sql: counterparty_id
+        type: count_distinct
+        title: Unique Counterparties
+        format: number
+        description: How many distinct parties this org/division paid.
+
+      # ── Amount ───────────────────────────────────────────────────────────
+
+      - name: total_amount
+        sql: total_amount
+        type: sum
+        title: Total Amount (Gross)
+        format: currency
+        description: Sum of gross outgoing amounts before fees.
+
+      - name: total_net_amount
+        sql: total_net_amount
+        type: sum
+        title: Total Net Amount
+        format: currency
+        description: Sum after fees are deducted.
+
+      - name: total_fees
+        sql: total_fees
+        type: sum
+        title: Total Fees
+        format: currency
+
+      - name: max_single_txn
+        sql: max_amount
+        type: max
+        title: Largest Single Transaction
+        format: currency
+        description: Highest individual transaction in this bucket.
+
+      - name: min_single_txn
+        sql: min_amount
+        type: min
+        title: Smallest Single Transaction
+        format: currency
+
+      - name: avg_transaction_amount
+        sql: avg_amount
+        type: avg
+        title: Avg Transaction Amount
+        format: currency
+
+      # ── Distribution — core measure for pie/donut charts ─────────────────
+      # percent_of_total automatically computes each row's share of the grand
+      # total for whatever grouping the query uses.
+      # In Superset: set metric = total_amount_pct, group by counterparty_name
+      # → instant distribution pie chart per org/division.
+
+      - name: total_amount_pct
+        sql: total_amount
+        type: percent_of_total
+        title: "% of Total Amount"
+        format: percent
+        description: >
+          Share of this counterparty's amount in the total for the queried
+          org/division and time window. Use for distribution (pie/donut) charts.
+
+      - name: total_txn_pct
+        sql: txn_count
+        type: percent_of_total
+        title: "% of Total Transactions"
+        format: percent
+        description: >
+          Share of transaction count going to this counterparty.
+
+      # ── Success / quality metrics ─────────────────────────────────────────
+
+      - name: success_rate
+        type: number
+        format: percent
+        title: Success Rate (%)
+        description: >
+          Percentage of transactions that reached COMPLETED status.
+          Numerator = COMPLETED txn_count; Denominator = all txn_count.
+        sql: >
+          ROUND(
+            100.0
+            * SUM(CASE WHEN {CUBE}.status = 'COMPLETED' THEN {CUBE}.txn_count ELSE 0 END)
+            / NULLIF(SUM({CUBE}.txn_count), 0),
+          2)
+
+      - name: failure_rate
+        type: number
+        format: percent
+        title: Failure Rate (%)
+        sql: >
+          ROUND(
+            100.0
+            * SUM(CASE WHEN {CUBE}.status IN ('FAILED','REVERSED') THEN {CUBE}.txn_count ELSE 0 END)
+            / NULLIF(SUM({CUBE}.txn_count), 0),
+          2)
+
+      - name: fee_rate
+        type: number
+        format: percent
+        title: Fee Rate (%)
+        description: Fees as a percentage of gross amount.
+        sql: >
+          ROUND(
+            100.0 * SUM({CUBE}.total_fees)
+            / NULLIF(SUM({CUBE}.total_amount), 0),
+          2)
+
+      - name: completed_amount
+        sql: "CASE WHEN {CUBE}.status = 'COMPLETED' THEN {CUBE}.total_amount ELSE 0 END"
+        type: sum
+        title: Completed Amount
+        format: currency
+        description: Gross amount from COMPLETED transactions only.
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Segments  (one-click filters for Superset)
+    # ─────────────────────────────────────────────────────────────────────────
+    segments:
+
+      - name: completed_only
+        sql: "{CUBE}.status = 'COMPLETED'"
+        title: Completed Only
+
+      - name: failed_only
+        sql: "{CUBE}.status IN ('FAILED', 'REVERSED')"
+        title: Failed / Reversed
+
+      - name: pending_only
+        sql: "{CUBE}.status NOT IN ('COMPLETED', 'FAILED', 'REVERSED')"
+        title: Pending / In-Progress
+
+      - name: wallet_transfers
+        sql: "{CUBE}.transfer_type = 'WALLET_TO_WALLET'"
+        title: Wallet-to-Wallet Only
+
+      - name: bank_payouts
+        sql: "{CUBE}.transfer_type IN ('WALLET_TO_ACCOUNT', 'ACCOUNT_TO_ACCOUNT')"
+        title: Bank Payouts Only
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Pre-aggregations
+    # ─────────────────────────────────────────────────────────────────────────
+    pre_aggregations:
+
+      # ── 1. Counterparty distribution — the primary chart pre-agg ──────────
+      # Powers: "For org X / division Y in month M, how much went to each party?"
+      # Superset chart: Pie / Donut / Bar — dimension=counterparty_name,
+      #                 metric=total_amount  (or total_amount_pct for %)
+      - name: counterparty_distribution_monthly
+        type: rollup
+        measures:
+          - OrgPayments.total_transactions
+          - OrgPayments.total_amount
+          - OrgPayments.total_net_amount
+          - OrgPayments.total_fees
+          - OrgPayments.completed_amount
+        dimensions:
+          - OrgPayments.org_id
+          - OrgPayments.division_id
+          - OrgPayments.counterparty_id
+          - OrgPayments.counterparty_name
+          - OrgPayments.counterparty_type
+          - OrgPayments.status
+          - OrgPayments.transfer_type
+        time_dimension: OrgPayments.txn_date
+        granularity: month
+        partition_granularity: month
+        build_range_start:
+          sql: SELECT DATE_TRUNC('month', MIN(txn_date)) FROM payment_analytics.org_txn_daily_summary
+        build_range_end:
+          sql: SELECT NOW()
+        refresh_key:
+          every: 1 hour
+        indexes:
+          - name: idx_cpd_org_div_date
+            columns:
+              - OrgPayments.org_id
+              - OrgPayments.division_id
+              - OrgPayments.txn_date
+          - name: idx_cpd_counterparty
+            columns:
+              - OrgPayments.counterparty_id
+              - OrgPayments.txn_date
+
+      # ── 2. Time trend — weekly line chart ────────────────────────────────
+      # Powers: "Show me weekly payment volume trend for org X / division Y"
+      # Superset chart: Line chart — x=week, y=total_amount,
+      #                 color=counterparty_name or transfer_type
+      - name: weekly_trend_by_division
+        type: rollup
+        measures:
+          - OrgPayments.total_transactions
+          - OrgPayments.total_amount
+          - OrgPayments.total_net_amount
+          - OrgPayments.total_fees
+        dimensions:
+          - OrgPayments.org_id
+          - OrgPayments.division_id
+          - OrgPayments.transfer_type
+          - OrgPayments.status
+        time_dimension: OrgPayments.txn_date
+        granularity: week
+        partition_granularity: month
+        build_range_start:
+          sql: SELECT DATE_TRUNC('week', MIN(txn_date)) FROM payment_analytics.org_txn_daily_summary
+        build_range_end:
+          sql: SELECT NOW()
+        refresh_key:
+          every: 1 hour
+        indexes:
+          - name: idx_wtd_org_div_week
+            columns:
+              - OrgPayments.org_id
+              - OrgPayments.division_id
+              - OrgPayments.txn_date
+
+      # ── 3. Monthly summary — KPI tiles & month-over-month comparison ──────
+      # Powers: "Total paid this month vs last month, success rate, top party"
+      # Superset chart: Big Number, Table, Bar with time compare
+      - name: monthly_summary_by_org
+        type: rollup
+        measures:
+          - OrgPayments.total_transactions
+          - OrgPayments.total_amount
+          - OrgPayments.total_net_amount
+          - OrgPayments.total_fees
+          - OrgPayments.completed_amount
+        dimensions:
+          - OrgPayments.org_id
+          - OrgPayments.division_id
+          - OrgPayments.transfer_type
+          - OrgPayments.status
+        time_dimension: OrgPayments.txn_date
+        granularity: month
+        partition_granularity: month
+        build_range_start:
+          sql: SELECT DATE_TRUNC('month', MIN(txn_date)) FROM payment_analytics.org_txn_daily_summary
+        build_range_end:
+          sql: SELECT NOW()
+        refresh_key:
+          every: 1 hour
+        indexes:
+          - name: idx_mso_org_div_month
+            columns:
+              - OrgPayments.org_id
+              - OrgPayments.division_id
+              - OrgPayments.txn_date
+
+      # ── 4. Daily detail — drill-down after clicking a bar/pie slice ───────
+      # Powers: "Show me daily breakdown after I click on counterparty Z"
+      # Superset chart: Table / Heatmap calendar
+      - name: daily_detail_by_counterparty
+        type: rollup
+        measures:
+          - OrgPayments.total_transactions
+          - OrgPayments.total_amount
+          - OrgPayments.total_net_amount
+        dimensions:
+          - OrgPayments.org_id
+          - OrgPayments.division_id
+          - OrgPayments.counterparty_id
+          - OrgPayments.counterparty_name
+          - OrgPayments.status
+          - OrgPayments.transfer_type
+        time_dimension: OrgPayments.txn_date
+        granularity: day
+        partition_granularity: month
+        build_range_start:
+          sql: SELECT DATE_TRUNC('day', MIN(txn_date)) FROM payment_analytics.org_txn_daily_summary
+        build_range_end:
+          sql: SELECT NOW()
+        refresh_key:
+          every: 30 minutes
+        indexes:
+          - name: idx_ddc_org_div_cp
+            columns:
+              - OrgPayments.org_id
+              - OrgPayments.division_id
+              - OrgPayments.counterparty_id
+              - OrgPayments.txn_date
+
+      # ── 5. Status distribution — success/fail/pending donut ──────────────
+      # Powers: "What % of payments failed for this division this quarter?"
+      # Superset chart: Donut — dimension=status, metric=total_transactions
+      - name: status_distribution_quarterly
+        type: rollup
+        measures:
+          - OrgPayments.total_transactions
+          - OrgPayments.total_amount
+        dimensions:
+          - OrgPayments.org_id
+          - OrgPayments.division_id
+          - OrgPayments.status
+          - OrgPayments.transfer_type
+        time_dimension: OrgPayments.txn_date
+        granularity: quarter
+        partition_granularity: year
+        build_range_start:
+          sql: SELECT DATE_TRUNC('quarter', MIN(txn_date)) FROM payment_analytics.org_txn_daily_summary
+        build_range_end:
+          sql: SELECT NOW()
+        refresh_key:
+          every: 1 hour

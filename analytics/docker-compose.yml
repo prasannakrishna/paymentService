@@ -1,0 +1,300 @@
+version: "3.9"
+
+# ---------------------------------------------------------------------------
+# Payment Service Analytics Stack
+# Services: postgres-analytics, redis, airflow (webserver/scheduler/worker),
+#           superset, cube
+# ---------------------------------------------------------------------------
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.9.1
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__CORE__FERNET_KEY: "${AIRFLOW_FERNET_KEY:-REPLACE_WITH_BASE64_32_BYTE_KEY}"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: Asia/Kolkata
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://airflow:airflow@postgres-analytics:5432/airflow"
+    AIRFLOW__CELERY__BROKER_URL: "redis://redis:6379/0"
+    AIRFLOW__CELERY__RESULT_BACKEND: "db+postgresql://airflow:airflow@postgres-analytics:5432/airflow"
+    AIRFLOW__WEBSERVER__SECRET_KEY: "${AIRFLOW_WEBSERVER_SECRET_KEY:-change_me_in_production}"
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"
+    AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
+    # Source payment DB connection (configure as Airflow Connection 'payment_db')
+    PAYMENT_DB_HOST: "${PAYMENT_DB_HOST:-host.docker.internal}"
+    PAYMENT_DB_PORT: "${PAYMENT_DB_PORT:-5432}"
+    PAYMENT_DB_NAME: "${PAYMENT_DB_NAME:-payment}"
+    PAYMENT_DB_USER: "${PAYMENT_DB_USER:-payment_user}"
+    PAYMENT_DB_PASS: "${PAYMENT_DB_PASS:-payment_pass}"
+    # Analytics DB connection (configure as Airflow Connection 'payment_analytics_db')
+    ANALYTICS_DB_HOST: "postgres-analytics"
+    ANALYTICS_DB_PORT: "5432"
+    ANALYTICS_DB_NAME: "payment_analytics"
+    ANALYTICS_DB_USER: "analytics"
+    ANALYTICS_DB_PASS: "${ANALYTICS_DB_PASS:-analytics_pass}"
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./sql:/opt/airflow/sql
+    - airflow-logs:/opt/airflow/logs
+    - airflow-plugins:/opt/airflow/plugins
+  depends_on:
+    postgres-analytics:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  networks:
+    - payment-analytics
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Analytics PostgreSQL (port 5433 on host to avoid conflict with source PG)
+  # ---------------------------------------------------------------------------
+  postgres-analytics:
+    image: postgres:16
+    container_name: postgres-analytics
+    environment:
+      POSTGRES_USER: analytics
+      POSTGRES_PASSWORD: "${ANALYTICS_DB_PASS:-analytics_pass}"
+      POSTGRES_DB: payment_analytics
+      # Create the airflow DB as well via init scripts
+      POSTGRES_MULTIPLE_DATABASES: "payment_analytics,airflow,superset"
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-analytics-data:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U analytics -d payment_analytics"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - payment-analytics
+
+  # ---------------------------------------------------------------------------
+  # Redis — Celery broker
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: redis-analytics
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - payment-analytics
+
+  # ---------------------------------------------------------------------------
+  # Airflow — DB init & admin user creation (one-shot)
+  # ---------------------------------------------------------------------------
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db upgrade
+        airflow users create \
+          --username admin \
+          --password "${AIRFLOW_ADMIN_PASSWORD:-admin}" \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@paymentservice.local
+        # Register source DB connection
+        airflow connections add payment_db \
+          --conn-type postgres \
+          --conn-host "${PAYMENT_DB_HOST:-host.docker.internal}" \
+          --conn-port "${PAYMENT_DB_PORT:-5432}" \
+          --conn-schema "${PAYMENT_DB_NAME:-payment}" \
+          --conn-login "${PAYMENT_DB_USER:-payment_user}" \
+          --conn-password "${PAYMENT_DB_PASS:-payment_pass}" || true
+        # Register analytics DB connection
+        airflow connections add payment_analytics_db \
+          --conn-type postgres \
+          --conn-host postgres-analytics \
+          --conn-port 5432 \
+          --conn-schema payment_analytics \
+          --conn-login analytics \
+          --conn-password "${ANALYTICS_DB_PASS:-analytics_pass}" || true
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # Airflow Webserver
+  # ---------------------------------------------------------------------------
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      postgres-analytics:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Airflow Scheduler
+  # ---------------------------------------------------------------------------
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$(hostname)"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      postgres-analytics:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Airflow Celery Worker
+  # ---------------------------------------------------------------------------
+  airflow-worker:
+    <<: *airflow-common
+    container_name: airflow-worker
+    command: celery worker
+    environment:
+      <<: *airflow-env
+      DUMB_INIT_SETSID: "0"
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - 'celery --app airflow.executors.celery_executor.app inspect ping -d "celery@${HOSTNAME}"'
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      postgres-analytics:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Apache Superset
+  # ---------------------------------------------------------------------------
+  superset:
+    image: apache/superset:latest
+    container_name: superset
+    environment:
+      SUPERSET_SECRET_KEY: "${SUPERSET_SECRET_KEY:-change_me_in_production}"
+      DATABASE_URL: "postgresql+psycopg2://analytics:${ANALYTICS_DB_PASS:-analytics_pass}@postgres-analytics:5432/superset"
+      REDIS_URL: "redis://redis:6379/1"
+      SUPERSET_LOAD_EXAMPLES: "false"
+      WTF_CSRF_ENABLED: "true"
+      # Analytics DB for dashboards
+      ANALYTICS_DB_HOST: "postgres-analytics"
+      ANALYTICS_DB_PORT: "5432"
+      ANALYTICS_DB_NAME: "payment_analytics"
+      ANALYTICS_DB_USER: "analytics"
+      ANALYTICS_DB_PASS: "${ANALYTICS_DB_PASS:-analytics_pass}"
+    ports:
+      - "8088:8088"
+    volumes:
+      - superset-data:/app/superset_home
+    command:
+      - /bin/sh
+      - -c
+      - |
+        superset db upgrade
+        superset fab create-admin \
+          --username admin \
+          --firstname Admin \
+          --lastname User \
+          --email admin@paymentservice.local \
+          --password "${SUPERSET_ADMIN_PASSWORD:-admin}" || true
+        superset init
+        superset run -h 0.0.0.0 -p 8088 --with-threads --reload --debugger
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8088/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    depends_on:
+      postgres-analytics:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - payment-analytics
+
+  # ---------------------------------------------------------------------------
+  # Cube (semantic layer / OLAP API)
+  # ---------------------------------------------------------------------------
+  cube:
+    image: cubejs/cube:latest
+    container_name: cube
+    environment:
+      CUBEJS_DB_TYPE: postgres
+      CUBEJS_DB_HOST: postgres-analytics
+      CUBEJS_DB_PORT: "5432"
+      CUBEJS_DB_NAME: payment_analytics
+      CUBEJS_DB_USER: analytics
+      CUBEJS_DB_PASS: "${ANALYTICS_DB_PASS:-analytics_pass}"
+      CUBEJS_API_SECRET: "${CUBE_API_SECRET:-REPLACE_WITH_LONG_RANDOM_SECRET}"
+      CUBEJS_DEV_MODE: "${CUBE_DEV_MODE:-false}"
+      CUBEJS_LOG_LEVEL: info
+      CUBEJS_SCHEDULED_REFRESH_TIMER: "30"
+      CUBEJS_PRE_AGGREGATIONS_SCHEMA: "payment_analytics_pre_agg"
+      CUBEJS_REDIS_URL: "redis://redis:6379/2"
+      TZ: Asia/Kolkata
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./cube/schema:/cube/conf/schema
+      - ./cube/cube.yml:/cube/conf/cube.yml
+    depends_on:
+      postgres-analytics:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:4000/cubejs-api/v1/meta"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - payment-analytics
+
+# ---------------------------------------------------------------------------
+# Volumes
+# ---------------------------------------------------------------------------
+volumes:
+  postgres-analytics-data:
+  airflow-logs:
+  airflow-plugins:
+  superset-data:
+
+# ---------------------------------------------------------------------------
+# Networks
+# ---------------------------------------------------------------------------
+networks:
+  payment-analytics:
+    driver: bridge
+    name: payment-analytics

@@ -1,0 +1,76 @@
+# =============================================================================
+# cube.yml
+# Cube (cube.dev) configuration for the payment analytics semantic layer.
+#
+# Environment variables expected (set in docker-compose or .env):
+#   ANALYTICS_DB_HOST   — hostname of the analytics PostgreSQL instance
+#   ANALYTICS_DB_PORT   — port (default 5432)
+#   ANALYTICS_DB_NAME   — database name (payment_analytics)
+#   ANALYTICS_DB_USER   — database user
+#   ANALYTICS_DB_PASS   — database password
+#   CUBE_API_SECRET     — long random string used to sign JWTs
+#   CUBE_DEV_MODE       — set to "true" only in local development
+# =============================================================================
+
+dataSource: default
+
+datasources:
+  default:
+    type: postgres
+    host: "{{ env_var('ANALYTICS_DB_HOST') }}"
+    port: "{{ env_var('ANALYTICS_DB_PORT', '5432') }}"
+    database: "{{ env_var('ANALYTICS_DB_NAME') }}"
+    user: "{{ env_var('ANALYTICS_DB_USER') }}"
+    password: "{{ env_var('ANALYTICS_DB_PASS') }}"
+
+apiSecret: "{{ env_var('CUBE_API_SECRET') }}"
+
+# ---------------------------------------------------------------------------
+# Refresh settings
+# ---------------------------------------------------------------------------
+# scheduledRefreshTimer controls how often (in seconds) Cube re-checks whether
+# pre-aggregations need refreshing.
+scheduledRefreshTimer: 30
+
+# Default timezone for all time dimensions — India Standard Time
+timezone: Asia/Kolkata
+
+# ---------------------------------------------------------------------------
+# Pre-aggregation storage
+# ---------------------------------------------------------------------------
+# Pre-aggregations are stored in a dedicated schema inside the analytics DB.
+# This avoids polluting the main payment_analytics schema.
+preAggregationsSchema: payment_analytics_pre_agg
+
+# ---------------------------------------------------------------------------
+# Development mode
+# ---------------------------------------------------------------------------
+# When CUBE_DEV_MODE=true, the playground UI is enabled and query limits are
+# relaxed.  Never enable in production.
+devMode: "{{ env_var('CUBE_DEV_MODE', 'false') }}"
+
+# ---------------------------------------------------------------------------
+# Query limits
+# ---------------------------------------------------------------------------
+queryRewriteLimit: 100
+maxSourceRowLimit: 50000000      # 50 M rows max from the analytics DB per query
+
+# ---------------------------------------------------------------------------
+# CORS (allow Superset and internal dashboards to reach the Cube API)
+# ---------------------------------------------------------------------------
+http:
+  cors:
+    origin: "*"
+    methods:
+      - GET
+      - POST
+      - OPTIONS
+    allowedHeaders:
+      - Content-Type
+      - Authorization
+      - x-request-id
+
+# ---------------------------------------------------------------------------
+# Telemetry — disable anonymous usage reporting
+# ---------------------------------------------------------------------------
+telemetry: false

@@ -1,0 +1,106 @@
+# =============================================================================
+# OrgDivisionView.yml
+# Cube VIEW — the "org admin" perspective on payment analytics.
+#
+# A View is a pre-defined slice of one or more cubes. It controls exactly
+# which dimensions and measures are visible to Superset / external consumers,
+# reducing the number of fields an analyst has to navigate.
+#
+# This view is designed specifically for the use case:
+#   "As an org/division admin I want to see how my division's payments are
+#    distributed across counterparties, filter by date range, status, amount,
+#    and drill down from org → division → counterparty → daily trend."
+#
+# ─── Dashboard design this enables ──────────────────────────────────────────
+#
+#  Row 1 — KPI tiles (Big Number charts)
+#    ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
+#    │ Total Paid (₹)   │  │ Transactions     │  │ Success Rate (%) │  │ Unique Parties   │
+#    └──────────────────┘  └──────────────────┘  └──────────────────┘  └──────────────────┘
+#
+#  Row 2 — Distribution charts (filter via org_id + division_id + date range)
+#    ┌─────────────────────────────────┐  ┌─────────────────────────────────┐
+#    │ Pie: Amount by Counterparty     │  │ Bar: Top 10 Counterparties      │
+#    │ (shows % share per party)       │  │ (sorted by total_amount desc)   │
+#    └─────────────────────────────────┘  └─────────────────────────────────┘
+#
+#  Row 3 — Time trend (drill into a counterparty from Row 2 to filter this)
+#    ┌─────────────────────────────────────────────────────────────────────────┐
+#    │ Line: Weekly payment volume trend — coloured by transfer_type or status │
+#    └─────────────────────────────────────────────────────────────────────────┘
+#
+#  Row 4 — Status / quality
+#    ┌─────────────────────────────────┐  ┌─────────────────────────────────┐
+#    │ Donut: Transactions by Status   │  │ Table: Transactions by           │
+#    │ (COMPLETED / FAILED / PENDING)  │  │ Counterparty (with drill-down)  │
+#    └─────────────────────────────────┘  └─────────────────────────────────┘
+#
+# ─── How drill-down works ────────────────────────────────────────────────────
+#
+#  1. User selects org_id filter                → all charts scope to that org
+#  2. User selects division_id filter           → scope to that division
+#  3. User clicks a pie slice (counterparty)    → Superset adds counterparty
+#                                                  filter → weekly trend updates
+#  4. User clicks a bar in the weekly trend     → date filter narrows further
+#  5. User changes time range (last month / Q1) → all charts refresh from
+#                                                  pre-aggregations instantly
+# =============================================================================
+
+views:
+  - name: OrgDivisionPaymentView
+    title: Org / Division Payment Distribution
+    description: >
+      Focused view for organisation / division admins to analyse outgoing
+      payment distribution across counterparties. Supports counterparty
+      distribution pie/bar charts, weekly trend lines, status donut, and
+      drill-down from org → division → counterparty → date.
+
+    cubes:
+      - join_path: OrgPayments
+        prefix: false          # expose dimensions/measures without "OrgPayments_" prefix
+        includes:
+
+          # ── Filters / grouping dims ──────────────────────────────────────
+          - org_id
+          - division_id
+          - org_division_key      # "ACME / SALES" — for chart titles
+          - txn_date              # time filter + x-axis of line chart
+          - txn_year
+          - txn_quarter
+          - txn_month
+          - txn_week
+          - counterparty_id
+          - counterparty_name     # label in pie slices / bar axis
+          - counterparty_type     # WALLET vs BANK_ACCOUNT filter
+          - transfer_type         # W2W / W2A / A2A etc.
+          - status                # COMPLETED / FAILED / …
+          - amount_bucket         # < ₹1K  /  ₹1K–₹10K  / etc.
+
+          # ── KPI tile measures ────────────────────────────────────────────
+          - total_transactions    # "How many payments?"
+          - total_amount          # "How much gross outflow?"
+          - total_net_amount      # "After fees?"
+          - total_fees            # "How much did we pay in fees?"
+          - completed_amount      # "How much actually settled?"
+
+          # ── Distribution measures (pie / bar / table) ────────────────────
+          - total_amount_pct      # "What % of total goes to this party?"
+          - total_txn_pct         # "What % of txn count goes to this party?"
+          - unique_counterparties # "How many distinct parties paid?"
+
+          # ── Quality metrics ──────────────────────────────────────────────
+          - success_rate          # "% completed"
+          - failure_rate          # "% failed/reversed"
+          - fee_rate              # "fees as % of gross"
+
+          # ── Transaction size metrics ─────────────────────────────────────
+          - avg_transaction_amount
+          - max_single_txn
+          - min_single_txn
+
+          # ── Segments (one-click Superset filters) ────────────────────────
+          - completed_only
+          - failed_only
+          - pending_only
+          - wallet_transfers
+          - bank_payouts

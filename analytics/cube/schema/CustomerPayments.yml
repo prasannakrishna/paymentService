@@ -1,0 +1,334 @@
+# =============================================================================
+# CustomerPayments.yml
+# Cube semantic model for individual customer payment analytics.
+#
+# Source table: payment_analytics.customer_txn_daily_summary
+#
+# Each row = one (customer_id, txn_date, counterparty_id,
+#                  transfer_type, status) bucket with pre-computed totals.
+#
+# Designed to answer:
+#   "For customer X, how much did they spend, to whom, over what period,
+#    with which payment methods, and what was the success rate?"
+# =============================================================================
+
+cubes:
+  - name: CustomerPayments
+    sql_table: payment_analytics.customer_txn_daily_summary
+    title: Customer Payments
+    description: >
+      Daily payment aggregates for individual customers.
+      Supports spending distribution charts, time-trend lines,
+      counterparty grouping, and status-based drill-down.
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Dimensions
+    # ─────────────────────────────────────────────────────────────────────────
+    dimensions:
+
+      - name: summary_id
+        sql: summary_id
+        type: number
+        primary_key: true
+        shown: false
+
+      - name: customer_id
+        sql: customer_id
+        type: string
+        title: Customer ID
+
+      # ── Time ─────────────────────────────────────────────────────────────
+
+      - name: txn_date
+        sql: txn_date
+        type: time
+        title: Transaction Date
+
+      - name: txn_year
+        sql: "EXTRACT(YEAR FROM txn_date)::int"
+        type: number
+        title: Year
+
+      - name: txn_quarter
+        sql: "EXTRACT(QUARTER FROM txn_date)::int"
+        type: number
+        title: Quarter
+
+      - name: txn_month
+        sql: "EXTRACT(MONTH FROM txn_date)::int"
+        type: number
+        title: Month
+
+      - name: txn_week
+        sql: "DATE_TRUNC('week', txn_date)"
+        type: time
+        title: Week (starts Monday)
+
+      # ── Counterparty ─────────────────────────────────────────────────────
+
+      - name: counterparty_id
+        sql: counterparty_id
+        type: string
+        title: Counterparty ID
+
+      - name: counterparty_name
+        sql: "COALESCE(counterparty_name, counterparty_id)"
+        type: string
+        title: Counterparty Name
+
+      - name: counterparty_type
+        sql: counterparty_type
+        type: string
+        title: Counterparty Type
+        description: "WALLET or BANK_ACCOUNT"
+
+      - name: transfer_type
+        sql: transfer_type
+        type: string
+        title: Transfer Type
+
+      - name: status
+        sql: status
+        type: string
+        title: Status
+
+      - name: amount_bucket
+        type: string
+        title: Amount Range
+        sql: >
+          CASE
+            WHEN total_amount < 1000    THEN 'A: < ₹1K'
+            WHEN total_amount < 10000   THEN 'B: ₹1K – ₹10K'
+            WHEN total_amount < 100000  THEN 'C: ₹10K – ₹1L'
+            WHEN total_amount < 1000000 THEN 'D: ₹1L – ₹10L'
+            ELSE                             'E: > ₹10L'
+          END
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Measures
+    # ─────────────────────────────────────────────────────────────────────────
+    measures:
+
+      - name: total_transactions
+        sql: txn_count
+        type: sum
+        title: Total Transactions
+        format: number
+
+      - name: unique_customers
+        sql: customer_id
+        type: count_distinct
+        title: Unique Customers
+        format: number
+
+      - name: unique_counterparties
+        sql: counterparty_id
+        type: count_distinct
+        title: Unique Counterparties
+        format: number
+
+      - name: total_amount
+        sql: total_amount
+        type: sum
+        title: Total Amount (Gross)
+        format: currency
+
+      - name: total_net_amount
+        sql: total_net_amount
+        type: sum
+        title: Total Net Amount
+        format: currency
+
+      - name: total_fees
+        sql: total_fees
+        type: sum
+        title: Total Fees
+        format: currency
+
+      - name: completed_amount
+        sql: "CASE WHEN {CUBE}.status = 'COMPLETED' THEN {CUBE}.total_amount ELSE 0 END"
+        type: sum
+        title: Completed Amount
+        format: currency
+
+      - name: avg_transaction_amount
+        sql: avg_amount
+        type: avg
+        title: Avg Transaction Amount
+        format: currency
+
+      - name: max_single_txn
+        sql: max_amount
+        type: max
+        title: Largest Single Transaction
+        format: currency
+
+      - name: min_single_txn
+        sql: min_amount
+        type: min
+        title: Smallest Single Transaction
+        format: currency
+
+      # ── Distribution measures ─────────────────────────────────────────────
+
+      - name: total_amount_pct
+        sql: total_amount
+        type: percent_of_total
+        title: "% of Total Amount"
+        format: percent
+        description: >
+          Each counterparty's share of the customer's total spending.
+          Use as metric in pie/donut charts grouped by counterparty_name.
+
+      - name: total_txn_pct
+        sql: txn_count
+        type: percent_of_total
+        title: "% of Total Transactions"
+        format: percent
+
+      # ── Quality ───────────────────────────────────────────────────────────
+
+      - name: success_rate
+        type: number
+        format: percent
+        title: Success Rate (%)
+        sql: >
+          ROUND(
+            100.0
+            * SUM(CASE WHEN {CUBE}.status = 'COMPLETED' THEN {CUBE}.txn_count ELSE 0 END)
+            / NULLIF(SUM({CUBE}.txn_count), 0),
+          2)
+
+      - name: failure_rate
+        type: number
+        format: percent
+        title: Failure Rate (%)
+        sql: >
+          ROUND(
+            100.0
+            * SUM(CASE WHEN {CUBE}.status IN ('FAILED','REVERSED') THEN {CUBE}.txn_count ELSE 0 END)
+            / NULLIF(SUM({CUBE}.txn_count), 0),
+          2)
+
+      - name: fee_rate
+        type: number
+        format: percent
+        title: Fee Rate (%)
+        sql: >
+          ROUND(
+            100.0 * SUM({CUBE}.total_fees)
+            / NULLIF(SUM({CUBE}.total_amount), 0),
+          2)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Segments
+    # ─────────────────────────────────────────────────────────────────────────
+    segments:
+
+      - name: completed_only
+        sql: "{CUBE}.status = 'COMPLETED'"
+        title: Completed Only
+
+      - name: failed_only
+        sql: "{CUBE}.status IN ('FAILED', 'REVERSED')"
+        title: Failed / Reversed
+
+      - name: pending_only
+        sql: "{CUBE}.status NOT IN ('COMPLETED', 'FAILED', 'REVERSED')"
+        title: Pending / In-Progress
+
+      - name: wallet_transfers
+        sql: "{CUBE}.transfer_type = 'WALLET_TO_WALLET'"
+        title: Wallet-to-Wallet Only
+
+      - name: bank_payouts
+        sql: "{CUBE}.transfer_type IN ('WALLET_TO_ACCOUNT','ACCOUNT_TO_ACCOUNT')"
+        title: Bank Payouts Only
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Pre-aggregations
+    # ─────────────────────────────────────────────────────────────────────────
+    pre_aggregations:
+
+      - name: counterparty_distribution_monthly
+        type: rollup
+        measures:
+          - CustomerPayments.total_transactions
+          - CustomerPayments.total_amount
+          - CustomerPayments.total_net_amount
+          - CustomerPayments.total_fees
+          - CustomerPayments.completed_amount
+        dimensions:
+          - CustomerPayments.customer_id
+          - CustomerPayments.counterparty_id
+          - CustomerPayments.counterparty_name
+          - CustomerPayments.counterparty_type
+          - CustomerPayments.status
+          - CustomerPayments.transfer_type
+        time_dimension: CustomerPayments.txn_date
+        granularity: month
+        partition_granularity: month
+        build_range_start:
+          sql: SELECT DATE_TRUNC('month', MIN(txn_date)) FROM payment_analytics.customer_txn_daily_summary
+        build_range_end:
+          sql: SELECT NOW()
+        refresh_key:
+          every: 1 hour
+        indexes:
+          - name: idx_cdm_customer_date
+            columns:
+              - CustomerPayments.customer_id
+              - CustomerPayments.txn_date
+
+      - name: weekly_trend
+        type: rollup
+        measures:
+          - CustomerPayments.total_transactions
+          - CustomerPayments.total_amount
+          - CustomerPayments.total_net_amount
+        dimensions:
+          - CustomerPayments.customer_id
+          - CustomerPayments.transfer_type
+          - CustomerPayments.status
+        time_dimension: CustomerPayments.txn_date
+        granularity: week
+        partition_granularity: month
+        build_range_start:
+          sql: SELECT DATE_TRUNC('week', MIN(txn_date)) FROM payment_analytics.customer_txn_daily_summary
+        build_range_end:
+          sql: SELECT NOW()
+        refresh_key:
+          every: 1 hour
+        indexes:
+          - name: idx_cwt_customer_week
+            columns:
+              - CustomerPayments.customer_id
+              - CustomerPayments.txn_date
+
+      - name: daily_detail_by_counterparty
+        type: rollup
+        measures:
+          - CustomerPayments.total_transactions
+          - CustomerPayments.total_amount
+          - CustomerPayments.total_net_amount
+        dimensions:
+          - CustomerPayments.customer_id
+          - CustomerPayments.counterparty_id
+          - CustomerPayments.counterparty_name
+          - CustomerPayments.status
+          - CustomerPayments.transfer_type
+        time_dimension: CustomerPayments.txn_date
+        granularity: day
+        partition_granularity: month
+        build_range_start:
+          sql: SELECT DATE_TRUNC('day', MIN(txn_date)) FROM payment_analytics.customer_txn_daily_summary
+        build_range_end:
+          sql: SELECT NOW()
+        refresh_key:
+          every: 30 minutes
+        indexes:
+          - name: idx_cddc_customer_cp_day
+            columns:
+              - CustomerPayments.customer_id
+              - CustomerPayments.counterparty_id
+              - CustomerPayments.txn_date
