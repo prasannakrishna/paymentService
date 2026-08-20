@@ -23,7 +23,7 @@ public interface PaymentTransactionRepository extends JpaRepository<PaymentTrans
     boolean existsByOrderIdAndStatusIn(String orderId, Iterable<TransactionStatus> statuses);
 
     /** Counts standalone PG transactions eligible for purge. */
-    @Query("SELECT COUNT(p) FROM PaymentTransaction p WHERE p.createdAt < :cutoff")
+    @Query("SELECT COUNT(p) FROM PaymentTransaction p WHERE p.initiatedAt < :cutoff")
     long countByCreatedAtBefore(@Param("cutoff") LocalDateTime cutoff);
 
     /**
@@ -31,6 +31,6 @@ public interface PaymentTransactionRepository extends JpaRepository<PaymentTrans
      * Returns the number of deleted rows.
      */
     @Modifying
-    @Query("DELETE FROM PaymentTransaction p WHERE p.createdAt < :cutoff")
+    @Query("DELETE FROM PaymentTransaction p WHERE p.initiatedAt < :cutoff")
     int deleteByCreatedAtBefore(@Param("cutoff") LocalDateTime cutoff);
 }
