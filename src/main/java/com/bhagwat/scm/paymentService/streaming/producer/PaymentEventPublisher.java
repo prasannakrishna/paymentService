@@ -8,11 +8,11 @@ import com.bhagwat.scm.paymentService.entity.wallet.IndividualWallet;
 import com.bhagwat.scm.paymentService.entity.wallet.WalletTransfer;
 import com.bhagwat.scm.paymentService.repository.EnterpriseWalletRepository;
 import com.bhagwat.scm.paymentService.repository.IndividualWalletRepository;
+import com.bhagwat.scm.kafka.producer.KafkaMessageProducer;
 import com.bhagwat.scm.paymentService.streaming.event.PaymentSuccessEvent;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.SendResult;
 import org.springframework.stereotype.Component;
 
@@ -39,7 +39,7 @@ import java.util.concurrent.CompletableFuture;
 @RequiredArgsConstructor
 public class PaymentEventPublisher {
 
-    private final KafkaTemplate<String, PaymentSuccessEvent> kafkaTemplate;
+    private final KafkaMessageProducer kafkaProducer;
     private final IndividualWalletRepository individualWalletRepository;
     private final EnterpriseWalletRepository enterpriseWalletRepository;
 
@@ -193,8 +193,8 @@ public class PaymentEventPublisher {
     }
 
     private void sendAsync(String key, PaymentSuccessEvent event) {
-        CompletableFuture<SendResult<String, PaymentSuccessEvent>> future =
-                kafkaTemplate.send(successTopic, key, event);
+        CompletableFuture<SendResult<String, String>> future =
+                kafkaProducer.sendAsync(successTopic, key, event);
 
         future.whenComplete((result, ex) -> {
             if (ex != null) {
