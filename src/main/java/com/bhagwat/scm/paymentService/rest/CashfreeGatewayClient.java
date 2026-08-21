@@ -4,7 +4,6 @@ import com.bhagwat.scm.paymentService.dto.cashfree.CfCreateOrderRequest;
 import com.bhagwat.scm.paymentService.dto.cashfree.CfCreateOrderResponse;
 import com.bhagwat.scm.paymentService.dto.cashfree.CfOrderStatusResponse;
 import com.bhagwat.scm.paymentService.exception.PaymentGatewayException;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
@@ -25,11 +24,13 @@ import org.springframework.web.client.RestClientException;
  */
 @Slf4j
 @Component
-@RequiredArgsConstructor
 public class CashfreeGatewayClient {
 
-    @Qualifier("cashfreeRestClient")
     private final RestClient restClient;
+
+    public CashfreeGatewayClient(@Qualifier("cashfreeRestClient") RestClient restClient) {
+        this.restClient = restClient;
+    }
 
     // ── Create Order ──────────────────────────────────────────────────────────
 
