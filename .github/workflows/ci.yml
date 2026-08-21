@@ -27,6 +27,11 @@ jobs:
           distribution: 'temurin'
           cache: 'maven'
 
+      - name: Install shared libraries
+        run: |
+          git clone --depth=1 https://github.com/prasannakrishna/shared-library.git /tmp/shared-library
+          cd /tmp/shared-library && chmod +x gradlew && ./gradlew publishToMavenLocal -q
+
       - name: Build JAR
         run: mvn -q -DskipTests clean package
 
@@ -46,3 +51,17 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Deploy to Hetzner
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 62.238.105.104
+          username: root
+          key: ${{ secrets.HETZNER_SSH_KEY }}
+          script: |
+            echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            cd /root/commart-deploy
+            docker compose pull payment-service
+            docker compose up -d --no-deps payment-service
+            echo "payment-service deployed successfully"
