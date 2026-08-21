@@ -8,10 +8,10 @@ import com.bhagwat.scm.paymentService.entity.OrgWallet;
 import com.bhagwat.scm.paymentService.repository.CustomerWalletRepository;
 import com.bhagwat.scm.paymentService.repository.OrgWalletRepository;
 import com.bhagwat.scm.paymentService.rest.CashfreeService;
+import com.bhagwat.scm.kafka.producer.KafkaMessageProducer;
 import com.bhagwat.scm.paymentService.streaming.event.PaymentSuccessEvent;
 import com.bhagwat.scm.paymentService.streaming.producer.PaymentEventPublisher;
 import lombok.RequiredArgsConstructor;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -38,7 +38,7 @@ public class PaymentService {
     private final CashfreeService           cashfreeService;
     private final OrgWalletRepository       orgWalletRepository;
     private final CustomerWalletRepository  customerWalletRepository;
-    private final KafkaTemplate<String, PaymentSuccessEvent> kafkaTemplate;
+    private final KafkaMessageProducer kafkaProducer;
 
     @Value("${payment.topics.success:payment.success.events}")
     private String successTopic;
@@ -104,7 +104,7 @@ public class PaymentService {
                 .succeededAt(LocalDateTime.now())
                 .build();
 
-        kafkaTemplate.send(successTopic, event.getCustomerId(), event);
+        kafkaProducer.send(successTopic, event.getCustomerId(), event);
         return "Payment successful";
     }
 
